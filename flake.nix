@@ -27,61 +27,46 @@
       (system: f system inputs.nixpkgs.legacyPackages.${system});
     forAllSystems = forSystems supportedSystems;
 
-    genAttrs = prefix: names: f:
-      builtins.listToAttrs (builtins.map (name: {
-          name = "${prefix}-${name}";
-          value = f name;
-        })
-        names);
-    languages = ["en" "es"];
-    inherit (nixpkgs.lib) toUpper;
-    translations = builtins.listToAttrs (builtins.map (lang: {
-        name = "translation-${lang}";
-        value = (
-          let
-            pkgs = import nixpkgs {system = "x86_64-linux";};
-          in
-            pkgs.stdenv.mkDerivation {
-              name = "iron-os-translation-${lang}";
-              src = "${src}/Translations";
-              buildPhase = let
-                langUp = toUpper lang;
-              in ''
-                mkdir build
-                python3 make_translation.py -o Translation.${langUp}.cpp --output-pickled ${langUp}.pickle ${langUp}
-              '';
-              installPhase = ''
-                mkdir -p $out
-                cp ./Translation.*.cpp $out
-                cp ./*.pickle $out
-              '';
-              prePatch = ''
-                substituteInPlace make_translation.py --replace ' = read_version()' ' = "v2.19"'
-              '';
-              buildInputs = [
-                (pkgs.python3.withPackages (ps: [
-                  (ps.buildPythonPackage {
-                    pname = "bdflib";
-                    version = "2.0.1";
-                    src = py_bdflib;
-                    doCheck = false;
-                  })
-                ]))
-              ];
-            }
-        );
-      })
-      languages);
-    builds = genAttrs "ironos" languages (
-      lang: let
-        cross =
+    genAttrs = prefix: f: let
+      inherit (nixpkgs.lib) flatten map;
+      inherit (builtins) listToAttrs;
+    in
+      listToAttrs (flatten (
+        map (
+          model:
+            map (lang: {
+              name = "${prefix}-${model}-${lang}";
+              value = f model lang;
+            })
+            languages
+        )
+        models
+      ));
+    languages = import "${self}/nix/utils/translations-list.nix";
+    models = import "${self}/nix/utils/models-list.nix";
+    builds = genAttrs "ironos" (
+      model: lang: let
+        cross = let
+          riscv-overlay = final: prev: {
+            pkgsCross.riscv32-embedded-ilp32 = import prev.path {
+              crossSystem = {
+                config = "riscv32-none-elf";
+                libc = "newlib";
+                gcc = {
+                  arch = "rv32i";
+                  abi = "ilp32";
+                };
+              };
+              system = "x86_64-linux";
+            };
+          };
+        in
           (import nixpkgs {
             system = "x86_64-linux";
-            overlays = [self.overlays.default];
+            overlays = [riscv-overlay];
           })
           .pkgsCross
-          .riscv32-embedded-temp;
-        translation = builtins.getAttr "translation-${lang}" translations;
+          .riscv32-embedded-ilp32;
         newlib = cross.stdenv.mkDerivation {
           name = "newlib";
           src = cross.newlib-nano.overrideAttrs (_: oldAttrs: {
@@ -97,7 +82,7 @@
         };
       in
         cross.stdenv.mkDerivation {
-          name = "ironos-${lang}";
+          name = "ironos-${model}-${lang}";
           src = "${src}/source";
           prePatch = ''
             substituteInPlace Makefile --replace 'riscv-' 'riscv32-'
@@ -105,12 +90,7 @@
             substituteInPlace Makefile --replace '$(HEXFILE_DIR)/$(model)_%.dfu' ' '
             cp -r ${usbpd}/* ./Core/Drivers/usb-pd
           '';
-          buildFlags = ["firmware-${toUpper lang}"];
-          configurePhase = ''
-            mkdir -p Core/Gen/translation.files
-            cp ${translation}/Translation.*.cpp Core/Gen
-            cp ${translation}/*.pickle Core/Gen/translation.files
-          '';
+          buildFlags = ["model=${model}" "firmware-${lang}"];
           installPhase = ''
             mkdir $out
             cp Hexfile/*.hex $out
@@ -127,23 +107,8 @@
       );
     in
       {
-        inherit (pkgs) hello;
-        default = self.packages.${system}.ironos-en;
+        default = self.packages.${system}.ironos-Pinecilv2-EN;
       }
-      // builds
-      // translations);
-    overlays.default = final: prev: {
-      pkgsCross.riscv32-embedded-temp = import prev.path {
-        crossSystem = {
-          config = "riscv32-none-elf";
-          libc = "newlib";
-          gcc = {
-            arch = "rv32i";
-            abi = "ilp32";
-          };
-        };
-        system = "x86_64-linux";
-      };
-    };
+      // builds);
   };
 }
